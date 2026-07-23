@@ -1,9 +1,8 @@
 import AppKit
 
 private let rowHeight: CGFloat = 34
-private let thumbnailWidth: CGFloat = 220
-private let thumbnailHeight: CGFloat = 182
-private let thumbnailSpacing: CGFloat = 10
+private let baseThumbnailSize = CGSize(width: 220, height: 182)
+private let baseThumbnailSpacing: CGFloat = 10
 
 private final class SwitcherPanel: NSPanel {
     override var canBecomeKey: Bool { false }
@@ -54,25 +53,45 @@ private final class WindowRowView: NSView {
 }
 
 private final class ThumbnailProvider {
+    private let captureQueue = DispatchQueue(label: "com.junwen.TabFlow.thumbnail-capture", qos: .userInitiated)
     private var cache: [WindowKey: NSImage] = [:]
 
-    func image(for window: SwitchableWindow) -> NSImage? {
+    func cachedImage(for window: SwitchableWindow) -> NSImage? {
+        cache[window.key]
+    }
+
+    func loadImage(for window: SwitchableWindow, completion: @escaping (NSImage?) -> Void) {
         if let image = cache[window.key] {
-            return image
+            completion(image)
+            return
         }
-        guard let windowID = window.windowID,
-              let cgImage = CGWindowListCreateImage(
+
+        captureQueue.async { [weak self] in
+            let cgImage = CGWindowListCreateImage(
                 .null,
                 .optionIncludingWindow,
-                windowID,
+                window.windowID,
                 [.boundsIgnoreFraming, .nominalResolution]
-              ) else {
-            return nil
+            )
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let image = cgImage.map {
+                    self.scaledImage(
+                        NSImage(cgImage: $0, size: .zero),
+                        maximumSize: CGSize(width: 440, height: 272)
+                    )
+                }
+                if let image {
+                    self.cache[window.key] = image
+                }
+                completion(image)
+            }
         }
-        let source = NSImage(cgImage: cgImage, size: .zero)
-        let image = scaledImage(source, maximumSize: CGSize(width: 440, height: 272))
-        cache[window.key] = image
-        return image
+    }
+
+    func retain(windows: [SwitchableWindow]) {
+        let validKeys = Set(windows.map(\.key))
+        cache = cache.filter { validKeys.contains($0.key) }
     }
 
     private func scaledImage(_ source: NSImage, maximumSize: CGSize) -> NSImage {
@@ -86,35 +105,38 @@ private final class ThumbnailProvider {
         result.unlockFocus()
         return result
     }
-
-    func retain(windows: [SwitchableWindow]) {
-        let validKeys = Set(windows.map(\.key))
-        cache = cache.filter { validKeys.contains($0.key) }
-    }
 }
 
 private final class WindowThumbnailView: NSView {
+    private let thumbnailView = NSImageView()
+    private let placeholderIconView = NSImageView()
     private let titleField = NSTextField(labelWithString: "")
+    private let selectionBorderWidth: CGFloat
 
-    init(window: SwitchableWindow, thumbnail: NSImage?) {
+    init(window: SwitchableWindow, thumbnail: NSImage?, size: CGSize) {
+        let scale = size.width / baseThumbnailSize.width
+        selectionBorderWidth = max(1.5, 3 * scale)
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.cornerRadius = 8
+        layer?.cornerRadius = max(4, 8 * scale)
         layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         translatesAutoresizingMaskIntoConstraints = false
 
         let previewContainer = NSView()
         previewContainer.wantsLayer = true
-        previewContainer.layer?.cornerRadius = 5
+        previewContainer.layer?.cornerRadius = max(3, 5 * scale)
         previewContainer.layer?.masksToBounds = true
         previewContainer.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
         previewContainer.translatesAutoresizingMaskIntoConstraints = false
 
-        let previewView = NSImageView()
-        previewView.image = thumbnail ?? window.application.icon
-        previewView.imageScaling = .scaleProportionallyUpOrDown
-        previewView.translatesAutoresizingMaskIntoConstraints = false
-        previewContainer.addSubview(previewView)
+        thumbnailView.imageScaling = .scaleProportionallyUpOrDown
+        thumbnailView.translatesAutoresizingMaskIntoConstraints = false
+        previewContainer.addSubview(thumbnailView)
+
+        placeholderIconView.image = window.application.icon
+        placeholderIconView.imageScaling = .scaleProportionallyUpOrDown
+        placeholderIconView.translatesAutoresizingMaskIntoConstraints = false
+        previewContainer.addSubview(placeholderIconView)
 
         let iconView = NSImageView()
         iconView.image = window.application.icon
@@ -123,52 +145,54 @@ private final class WindowThumbnailView: NSView {
 
         titleField.stringValue = window.displayTitle
         titleField.lineBreakMode = .byTruncatingTail
-        titleField.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        titleField.font = NSFont.systemFont(ofSize: max(9, 12 * scale), weight: .medium)
         titleField.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(previewContainer)
         addSubview(iconView)
         addSubview(titleField)
 
+        let padding = max(4, 7 * scale)
+        let iconSize = max(14, 20 * scale)
+        let placeholderSize = max(36, 64 * scale)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: thumbnailWidth),
-            heightAnchor.constraint(equalToConstant: thumbnailHeight),
-            previewContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
-            previewContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
-            previewContainer.topAnchor.constraint(equalTo: topAnchor, constant: 7),
-            previewContainer.heightAnchor.constraint(equalToConstant: 136),
-            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            iconView.topAnchor.constraint(equalTo: previewContainer.bottomAnchor, constant: 9),
-            iconView.widthAnchor.constraint(equalToConstant: 20),
-            iconView.heightAnchor.constraint(equalToConstant: 20),
-            titleField.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 7),
-            titleField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            widthAnchor.constraint(equalToConstant: size.width),
+            heightAnchor.constraint(equalToConstant: size.height),
+            previewContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
+            previewContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
+            previewContainer.topAnchor.constraint(equalTo: topAnchor, constant: padding),
+            previewContainer.heightAnchor.constraint(equalToConstant: 136 * scale),
+            thumbnailView.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor, constant: 3),
+            thumbnailView.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor, constant: -3),
+            thumbnailView.topAnchor.constraint(equalTo: previewContainer.topAnchor, constant: 3),
+            thumbnailView.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor, constant: -3),
+            placeholderIconView.centerXAnchor.constraint(equalTo: previewContainer.centerXAnchor),
+            placeholderIconView.centerYAnchor.constraint(equalTo: previewContainer.centerYAnchor),
+            placeholderIconView.widthAnchor.constraint(equalToConstant: placeholderSize),
+            placeholderIconView.heightAnchor.constraint(equalToConstant: placeholderSize),
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: max(6, 10 * scale)),
+            iconView.topAnchor.constraint(equalTo: previewContainer.bottomAnchor, constant: max(4, 9 * scale)),
+            iconView.widthAnchor.constraint(equalToConstant: iconSize),
+            iconView.heightAnchor.constraint(equalToConstant: iconSize),
+            titleField.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: max(4, 7 * scale)),
+            titleField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -max(6, 10 * scale)),
             titleField.centerYAnchor.constraint(equalTo: iconView.centerYAnchor)
         ])
-
-        if thumbnail == nil {
-            NSLayoutConstraint.activate([
-                previewView.centerXAnchor.constraint(equalTo: previewContainer.centerXAnchor),
-                previewView.centerYAnchor.constraint(equalTo: previewContainer.centerYAnchor),
-                previewView.widthAnchor.constraint(equalToConstant: 64),
-                previewView.heightAnchor.constraint(equalToConstant: 64)
-            ])
-        } else {
-            NSLayoutConstraint.activate([
-                previewView.leadingAnchor.constraint(equalTo: previewContainer.leadingAnchor, constant: 4),
-                previewView.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor, constant: -4),
-                previewView.topAnchor.constraint(equalTo: previewContainer.topAnchor, constant: 4),
-                previewView.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor, constant: -4)
-            ])
-        }
+        setThumbnail(thumbnail)
     }
 
     required init?(coder: NSCoder) {
         nil
     }
 
+    func setThumbnail(_ image: NSImage?) {
+        thumbnailView.image = image
+        thumbnailView.isHidden = image == nil
+        placeholderIconView.isHidden = image != nil
+    }
+
     func setSelected(_ selected: Bool) {
-        layer?.borderWidth = selected ? 3 : 0
+        layer?.borderWidth = selected ? selectionBorderWidth : 0
         layer?.borderColor = selected ? NSColor.controlAccentColor.cgColor : NSColor.clear.cgColor
         layer?.backgroundColor = selected
             ? NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
@@ -179,14 +203,16 @@ private final class WindowThumbnailView: NSView {
 final class SwitcherPanelController {
     private let panel: SwitcherPanel
     private let backgroundView = NSView()
-    private let stackView = NSStackView()
     private let thumbnailProvider = ThumbnailProvider()
+    private var layoutView: NSView?
     private var windows: [SwitchableWindow] = []
     private var itemViews: [Int: NSView] = [:]
     private var visibleRange = 0..<0
     private var selectedIndex = 0
     private var displayMode: SwitcherDisplayMode = .list
-    private var visibleCapacity = 14
+    private var thumbnailColumns = 1
+    private var thumbnailSize = baseThumbnailSize
+    private var thumbnailSpacing = baseThumbnailSpacing
 
     init() {
         panel = SwitcherPanel(
@@ -204,39 +230,21 @@ final class SwitcherPanelController {
         self.windows = windows
         self.selectedIndex = selectedIndex
         displayMode = SwitcherDisplayMode.selected
-        visibleRange = 0..<0
 
         let visibleFrame = screen.visibleFrame
-        if displayMode == .thumbnails {
-            let availableWidth = visibleFrame.width * 0.9 - 20
-            visibleCapacity = min(7, max(1, Int((availableWidth + thumbnailSpacing) / (thumbnailWidth + thumbnailSpacing))))
-            thumbnailProvider.retain(windows: windows)
-        } else {
-            visibleCapacity = 14
-        }
-
-        visibleRange = rangeToDisplay(selectedIndex: selectedIndex)
-        rebuildItems()
-
         let size: CGSize
         switch displayMode {
         case .list:
-            let visibleCount = max(1, visibleRange.count)
-            let rowsHeight = CGFloat(visibleCount) * rowHeight
-            let spacingHeight = CGFloat(max(0, visibleCount - 1))
-            let titleFont = NSFont.systemFont(ofSize: 13)
-            let longestTitleWidth = windows
-                .map { ($0.displayTitle as NSString).size(withAttributes: [.font: titleFont]).width }
-                .max() ?? 0
-            let panelWidth = min(visibleFrame.width * 0.85, max(560, longestTitleWidth + 80))
-            size = CGSize(width: panelWidth, height: rowsHeight + spacingHeight + 20)
+            visibleRange = listRangeToDisplay(selectedIndex: selectedIndex)
+            size = listPanelSize(in: visibleFrame)
         case .thumbnails:
-            let count = max(1, visibleRange.count)
-            let itemsWidth = CGFloat(count) * thumbnailWidth
-            let spacingWidth = CGFloat(max(0, count - 1)) * thumbnailSpacing
-            size = CGSize(width: itemsWidth + spacingWidth + 20, height: thumbnailHeight + 20)
+            visibleRange = 0..<windows.count
+            configureThumbnailGrid(windowCount: windows.count, in: visibleFrame)
+            size = thumbnailPanelSize(windowCount: windows.count)
+            thumbnailProvider.retain(windows: windows)
         }
 
+        rebuildLayout()
         let origin = CGPoint(
             x: visibleFrame.midX - size.width / 2,
             y: visibleFrame.midY - size.height / 2
@@ -244,21 +252,27 @@ final class SwitcherPanelController {
         panel.setFrame(CGRect(origin: origin, size: size), display: true)
         backgroundView.layoutSubtreeIfNeeded()
         panel.orderFrontRegardless()
+
+        if displayMode == .thumbnails {
+            loadThumbnails()
+        }
     }
 
     func select(index: Int) {
         guard windows.indices.contains(index) else { return }
         let previousIndex = selectedIndex
         selectedIndex = index
-        let newRange = rangeToDisplay(selectedIndex: index)
 
-        if newRange != visibleRange {
-            visibleRange = newRange
-            rebuildItems()
-        } else {
-            setSelected(false, at: previousIndex)
-            setSelected(true, at: selectedIndex)
+        if displayMode == .list {
+            let newRange = listRangeToDisplay(selectedIndex: index)
+            if newRange != visibleRange {
+                visibleRange = newRange
+                rebuildLayout()
+                return
+            }
         }
+        setSelected(false, at: previousIndex)
+        setSelected(true, at: selectedIndex)
     }
 
     func hide() {
@@ -280,23 +294,61 @@ final class SwitcherPanelController {
         backgroundView.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.97).cgColor
         backgroundView.layer?.cornerRadius = 10
         backgroundView.layer?.masksToBounds = true
-
-        stackView.distribution = .fill
-        stackView.translatesAutoresizingMaskIntoConstraints = false
-
-        backgroundView.addSubview(stackView)
-        NSLayoutConstraint.activate([
-            stackView.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 10),
-            stackView.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -10),
-            stackView.topAnchor.constraint(equalTo: backgroundView.topAnchor, constant: 10),
-            stackView.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor, constant: -10)
-        ])
         panel.contentView = backgroundView
     }
 
-    private func rangeToDisplay(selectedIndex: Int) -> Range<Int> {
+    private func listPanelSize(in visibleFrame: CGRect) -> CGSize {
+        let visibleCount = max(1, visibleRange.count)
+        let rowsHeight = CGFloat(visibleCount) * rowHeight
+        let spacingHeight = CGFloat(max(0, visibleCount - 1))
+        let titleFont = NSFont.systemFont(ofSize: 13)
+        let longestTitleWidth = windows
+            .map { ($0.displayTitle as NSString).size(withAttributes: [.font: titleFont]).width }
+            .max() ?? 0
+        let width = min(visibleFrame.width * 0.85, max(560, longestTitleWidth + 80))
+        return CGSize(width: width, height: rowsHeight + spacingHeight + 20)
+    }
+
+    private func configureThumbnailGrid(windowCount: Int, in visibleFrame: CGRect) {
+        let availableWidth = visibleFrame.width * 0.9 - 20
+        let availableHeight = visibleFrame.height * 0.85 - 20
+        var scale: CGFloat = 1
+
+        for _ in 0..<4 {
+            let width = baseThumbnailSize.width * scale
+            let height = baseThumbnailSize.height * scale
+            let spacing = baseThumbnailSpacing * scale
+            let columns = max(1, min(windowCount, Int((availableWidth + spacing) / (width + spacing))))
+            let rows = Int(ceil(Double(windowCount) / Double(columns)))
+            let requiredHeight = CGFloat(rows) * height + CGFloat(max(0, rows - 1)) * spacing
+            if requiredHeight <= availableHeight {
+                thumbnailColumns = columns
+                thumbnailSize = CGSize(width: width, height: height)
+                thumbnailSpacing = spacing
+                return
+            }
+            scale *= availableHeight / requiredHeight
+        }
+
+        thumbnailSize = CGSize(width: baseThumbnailSize.width * scale, height: baseThumbnailSize.height * scale)
+        thumbnailSpacing = baseThumbnailSpacing * scale
+        thumbnailColumns = max(
+            1,
+            min(windowCount, Int((availableWidth + thumbnailSpacing) / (thumbnailSize.width + thumbnailSpacing)))
+        )
+    }
+
+    private func thumbnailPanelSize(windowCount: Int) -> CGSize {
+        let columns = min(thumbnailColumns, windowCount)
+        let rows = Int(ceil(Double(windowCount) / Double(thumbnailColumns)))
+        let width = CGFloat(columns) * thumbnailSize.width + CGFloat(max(0, columns - 1)) * thumbnailSpacing + 20
+        let height = CGFloat(rows) * thumbnailSize.height + CGFloat(max(0, rows - 1)) * thumbnailSpacing + 20
+        return CGSize(width: width, height: height)
+    }
+
+    private func listRangeToDisplay(selectedIndex: Int) -> Range<Int> {
         guard !windows.isEmpty else { return 0..<0 }
-        let visibleCount = min(visibleCapacity, windows.count)
+        let visibleCount = min(14, windows.count)
         if windows.count <= visibleCount {
             return 0..<windows.count
         }
@@ -308,34 +360,93 @@ final class SwitcherPanelController {
         return start..<(start + visibleCount)
     }
 
-    private func rebuildItems() {
-        stackView.arrangedSubviews.forEach {
-            stackView.removeArrangedSubview($0)
-            $0.removeFromSuperview()
-        }
+    private func rebuildLayout() {
+        layoutView?.removeFromSuperview()
         itemViews = [:]
-        stackView.orientation = displayMode == .list ? .vertical : .horizontal
-        stackView.alignment = displayMode == .list ? .leading : .centerY
-        stackView.spacing = displayMode == .list ? 1 : thumbnailSpacing
+
+        let newLayout: NSView
+        switch displayMode {
+        case .list:
+            newLayout = buildListLayout()
+        case .thumbnails:
+            newLayout = buildThumbnailGrid()
+        }
+
+        newLayout.translatesAutoresizingMaskIntoConstraints = false
+        backgroundView.addSubview(newLayout)
+        NSLayoutConstraint.activate([
+            newLayout.leadingAnchor.constraint(equalTo: backgroundView.leadingAnchor, constant: 10),
+            newLayout.trailingAnchor.constraint(equalTo: backgroundView.trailingAnchor, constant: -10),
+            newLayout.topAnchor.constraint(equalTo: backgroundView.topAnchor, constant: 10),
+            newLayout.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor, constant: -10)
+        ])
+        layoutView = newLayout
+    }
+
+    private func buildListLayout() -> NSView {
+        let stackView = NSStackView()
+        stackView.orientation = .vertical
+        stackView.alignment = .leading
+        stackView.distribution = .fill
+        stackView.spacing = 1
 
         for index in visibleRange {
-            let item: NSView
-            switch displayMode {
-            case .list:
-                let row = WindowRowView(window: windows[index])
-                row.setSelected(index == selectedIndex)
-                row.widthAnchor.constraint(equalTo: stackView.widthAnchor).isActive = true
-                item = row
-            case .thumbnails:
-                let card = WindowThumbnailView(
-                    window: windows[index],
-                    thumbnail: thumbnailProvider.image(for: windows[index])
-                )
-                card.setSelected(index == selectedIndex)
-                item = card
+            let row = WindowRowView(window: windows[index])
+            row.setSelected(index == selectedIndex)
+            stackView.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: stackView.widthAnchor).isActive = true
+            itemViews[index] = row
+        }
+        return stackView
+    }
+
+    private func buildThumbnailGrid() -> NSView {
+        var rows: [[NSView]] = []
+        var row: [NSView] = []
+
+        for index in windows.indices {
+            let card = WindowThumbnailView(
+                window: windows[index],
+                thumbnail: thumbnailProvider.cachedImage(for: windows[index]),
+                size: thumbnailSize
+            )
+            card.setSelected(index == selectedIndex)
+            row.append(card)
+            itemViews[index] = card
+
+            if row.count == thumbnailColumns {
+                rows.append(row)
+                row = []
             }
-            stackView.addArrangedSubview(item)
-            itemViews[index] = item
+        }
+
+        if !row.isEmpty {
+            while row.count < thumbnailColumns {
+                let spacer = NSView()
+                spacer.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([
+                    spacer.widthAnchor.constraint(equalToConstant: thumbnailSize.width),
+                    spacer.heightAnchor.constraint(equalToConstant: thumbnailSize.height)
+                ])
+                row.append(spacer)
+            }
+            rows.append(row)
+        }
+
+        let gridView = NSGridView(views: rows)
+        gridView.columnSpacing = thumbnailSpacing
+        gridView.rowSpacing = thumbnailSpacing
+        gridView.xPlacement = .fill
+        gridView.yPlacement = .fill
+        return gridView
+    }
+
+    private func loadThumbnails() {
+        for index in windows.indices {
+            guard let card = itemViews[index] as? WindowThumbnailView else { continue }
+            thumbnailProvider.loadImage(for: windows[index]) { [weak card] image in
+                card?.setThumbnail(image)
+            }
         }
     }
 

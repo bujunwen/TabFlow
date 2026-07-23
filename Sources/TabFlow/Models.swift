@@ -3,7 +3,7 @@ import ApplicationServices
 
 struct WindowKey: Hashable {
     let pid: pid_t
-    let elementHash: Int
+    let windowID: CGWindowID
 }
 
 struct SwitchableWindow {
@@ -13,7 +13,7 @@ struct SwitchableWindow {
     let title: String
     let frame: CGRect
     let displayID: CGDirectDisplayID
-    let windowID: CGWindowID?
+    let windowID: CGWindowID
     let isMinimized: Bool
 
     var displayTitle: String {

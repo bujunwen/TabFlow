@@ -108,6 +108,7 @@ final class WindowStore {
             $0.activationPolicy == .regular && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
         }
         let onscreenWindows = currentSpaceWindowDescriptions()
+        let allWindows = allWindowDescriptions()
         var refreshed: [SwitchableWindow] = []
 
         for application in runningApplications {
@@ -137,7 +138,17 @@ final class WindowStore {
                 }
 
                 guard let displayID = DisplayManager.displayID(for: frame) else { continue }
-                let key = WindowKey(pid: application.processIdentifier, elementHash: Int(CFHash(element)))
+                let identityDescription = windowDescription ?? matchingDescription(
+                    pid: application.processIdentifier,
+                    title: title,
+                    frame: frame,
+                    descriptions: allWindows
+                )
+                let accessibilityWindowNumber: NSNumber? = attribute(element, "AXWindowNumber" as CFString)
+                guard let windowID = accessibilityWindowNumber?.uint32Value ?? identityDescription?.id else {
+                    continue
+                }
+                let key = WindowKey(pid: application.processIdentifier, windowID: windowID)
                 refreshed.append(SwitchableWindow(
                     key: key,
                     element: element,
@@ -145,23 +156,31 @@ final class WindowStore {
                     title: title,
                     frame: frame,
                     displayID: displayID,
-                    windowID: windowDescription?.id,
+                    windowID: windowID,
                     isMinimized: minimized
                 ))
             }
         }
 
         windows = refreshed
-        updateActiveWindow()
         let validKeys = Set(refreshed.map(\.key))
         recency = recency.filter { validKeys.contains($0.key) }
+        if recency.isEmpty {
+            seedRecency(from: onscreenWindows, validKeys: validKeys)
+        }
+        updateActiveWindow()
     }
 
     private func updateActiveWindow() {
         guard let frontmost = NSWorkspace.shared.frontmostApplication else { return }
         let appElement = AXUIElementCreateApplication(frontmost.processIdentifier)
-        guard let focused: AXUIElement = attribute(appElement, kAXFocusedWindowAttribute as CFString) else { return }
-        let key = WindowKey(pid: frontmost.processIdentifier, elementHash: Int(CFHash(focused)))
+        guard let focused: AXUIElement = attribute(appElement, kAXFocusedWindowAttribute as CFString),
+              let focusedWindow = windows.first(where: {
+                  $0.application.processIdentifier == frontmost.processIdentifier && CFEqual($0.element, focused)
+              }) else {
+            return
+        }
+        let key = focusedWindow.key
 
         if activeWindowKey != key {
             promote(key)
@@ -173,6 +192,15 @@ final class WindowStore {
     private func promote(_ key: WindowKey) {
         recencyClock += 1
         recency[key] = recencyClock
+    }
+
+    private func seedRecency(from descriptions: [WindowDescription], validKeys: Set<WindowKey>) {
+        for description in descriptions.reversed() {
+            let key = WindowKey(pid: description.pid, windowID: description.id)
+            if validKeys.contains(key) {
+                promote(key)
+            }
+        }
     }
 
     private func installObserverIfNeeded(for pid: pid_t, applicationElement: AXUIElement) {
@@ -239,8 +267,15 @@ final class WindowStore {
     }
 
     private func currentSpaceWindowDescriptions() -> [WindowDescription] {
-        guard let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
-                as? [[String: Any]] else {
+        windowDescriptions(options: [.optionOnScreenOnly, .excludeDesktopElements])
+    }
+
+    private func allWindowDescriptions() -> [WindowDescription] {
+        windowDescriptions(options: [.optionAll, .excludeDesktopElements])
+    }
+
+    private func windowDescriptions(options: CGWindowListOption) -> [WindowDescription] {
+        guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
         return raw.compactMap { info in
