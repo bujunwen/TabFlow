@@ -6,6 +6,8 @@ final class StatusMenuController: NSObject {
     private let eventTapManager: EventTapManager
     private let currentScreenItem = NSMenuItem(title: "仅当前屏幕", action: #selector(selectCurrentScreen), keyEquivalent: "")
     private let allScreensItem = NSMenuItem(title: "所有屏幕", action: #selector(selectAllScreens), keyEquivalent: "")
+    private let listModeItem = NSMenuItem(title: "纵向列表", action: #selector(selectListMode), keyEquivalent: "")
+    private let thumbnailModeItem = NSMenuItem(title: "横向缩略图", action: #selector(selectThumbnailMode), keyEquivalent: "")
     private let launchAtLoginItem = NSMenuItem(title: "开机自动启动", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
 
     init(eventTapManager: EventTapManager) {
@@ -41,6 +43,15 @@ final class StatusMenuController: NSObject {
         menu.addItem(allScreensItem)
         menu.addItem(.separator())
 
+        let modeTitle = NSMenuItem(title: "显示模式", action: nil, keyEquivalent: "")
+        modeTitle.isEnabled = false
+        menu.addItem(modeTitle)
+        listModeItem.target = self
+        thumbnailModeItem.target = self
+        menu.addItem(listModeItem)
+        menu.addItem(thumbnailModeItem)
+        menu.addItem(.separator())
+
         launchAtLoginItem.target = self
         menu.addItem(launchAtLoginItem)
         menu.addItem(.separator())
@@ -50,6 +61,7 @@ final class StatusMenuController: NSObject {
         menu.addItem(quitItem)
         statusItem.menu = menu
         refreshScopeState()
+        refreshDisplayModeState()
         refreshLaunchAtLoginState()
     }
 
@@ -61,6 +73,19 @@ final class StatusMenuController: NSObject {
     @objc private func selectAllScreens() {
         ScreenScope.selected = .all
         refreshScopeState()
+    }
+
+    @objc private func selectListMode() {
+        SwitcherDisplayMode.selected = .list
+        refreshDisplayModeState()
+    }
+
+    @objc private func selectThumbnailMode() {
+        SwitcherDisplayMode.selected = .thumbnails
+        if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()
+        }
+        refreshDisplayModeState()
     }
 
     @objc private func toggleLaunchAtLogin() {
@@ -85,6 +110,11 @@ final class StatusMenuController: NSObject {
     private func refreshScopeState() {
         currentScreenItem.state = ScreenScope.selected == .current ? .on : .off
         allScreensItem.state = ScreenScope.selected == .all ? .on : .off
+    }
+
+    private func refreshDisplayModeState() {
+        listModeItem.state = SwitcherDisplayMode.selected == .list ? .on : .off
+        thumbnailModeItem.state = SwitcherDisplayMode.selected == .thumbnails ? .on : .off
     }
 
     private func configureLaunchAtLoginIfNeeded() {

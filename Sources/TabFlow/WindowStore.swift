@@ -126,12 +126,13 @@ final class WindowStore {
                 guard let frame = frame(of: element) else { continue }
                 let minimized: Bool = attribute(element, kAXMinimizedAttribute as CFString) ?? false
 
-                if !minimized && !isOnCurrentSpace(
+                let windowDescription = matchingDescription(
                     pid: application.processIdentifier,
                     title: title,
                     frame: frame,
                     descriptions: onscreenWindows
-                ) {
+                )
+                if !minimized && windowDescription == nil {
                     continue
                 }
 
@@ -144,6 +145,7 @@ final class WindowStore {
                     title: title,
                     frame: frame,
                     displayID: displayID,
+                    windowID: windowDescription?.id,
                     isMinimized: minimized
                 ))
             }
@@ -230,6 +232,7 @@ final class WindowStore {
     }
 
     private struct WindowDescription {
+        let id: CGWindowID
         let pid: pid_t
         let title: String
         let bounds: CGRect
@@ -247,7 +250,11 @@ final class WindowStore {
                   let bounds = CGRect(dictionaryRepresentation: boundsDictionary) else {
                 return nil
             }
+            guard let windowID = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value else {
+                return nil
+            }
             return WindowDescription(
+                id: windowID,
                 pid: pid,
                 title: info[kCGWindowName as String] as? String ?? "",
                 bounds: bounds
@@ -255,13 +262,13 @@ final class WindowStore {
         }
     }
 
-    private func isOnCurrentSpace(
+    private func matchingDescription(
         pid: pid_t,
         title: String,
         frame: CGRect,
         descriptions: [WindowDescription]
-    ) -> Bool {
-        descriptions.contains { description in
+    ) -> WindowDescription? {
+        descriptions.first { description in
             guard description.pid == pid else { return false }
             let sameFrame = abs(description.bounds.minX - frame.minX) < 3 &&
                 abs(description.bounds.minY - frame.minY) < 3 &&
