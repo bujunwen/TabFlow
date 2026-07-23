@@ -3,6 +3,8 @@ import AppKit
 private let rowHeight: CGFloat = 34
 private let baseThumbnailSize = CGSize(width: 220, height: 182)
 private let baseThumbnailSpacing: CGFloat = 10
+private let thumbnailFooterHeight: CGFloat = 36
+private let thumbnailFooterSpacing: CGFloat = 8
 
 private final class SwitcherPanel: NSPanel {
     override var canBecomeKey: Bool { false }
@@ -143,7 +145,9 @@ private final class WindowThumbnailView: NSView {
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.translatesAutoresizingMaskIntoConstraints = false
 
-        titleField.stringValue = window.displayTitle
+        titleField.stringValue = window.title.isEmpty
+            ? (window.application.localizedName ?? "Unknown")
+            : window.title
         titleField.lineBreakMode = .byTruncatingTail
         titleField.font = NSFont.systemFont(ofSize: max(9, 12 * scale), weight: .medium)
         titleField.translatesAutoresizingMaskIntoConstraints = false
@@ -204,6 +208,7 @@ final class SwitcherPanelController {
     private let panel: SwitcherPanel
     private let backgroundView = NSView()
     private let thumbnailProvider = ThumbnailProvider()
+    private let selectedTitleField = NSTextField(labelWithString: "")
     private var layoutView: NSView?
     private var windows: [SwitchableWindow] = []
     private var itemViews: [Int: NSView] = [:]
@@ -263,6 +268,9 @@ final class SwitcherPanelController {
         let previousIndex = selectedIndex
         selectedIndex = index
 
+        if displayMode == .thumbnails {
+            updateSelectedTitle()
+        }
         if displayMode == .list {
             let newRange = listRangeToDisplay(selectedIndex: index)
             if newRange != visibleRange {
@@ -311,7 +319,7 @@ final class SwitcherPanelController {
 
     private func configureThumbnailGrid(windowCount: Int, in visibleFrame: CGRect) {
         let availableWidth = visibleFrame.width * 0.9 - 20
-        let availableHeight = visibleFrame.height * 0.85 - 20
+        let availableHeight = visibleFrame.height * 0.85 - 20 - thumbnailFooterHeight - thumbnailFooterSpacing
         var scale: CGFloat = 1
 
         for _ in 0..<4 {
@@ -342,7 +350,8 @@ final class SwitcherPanelController {
         let columns = min(thumbnailColumns, windowCount)
         let rows = Int(ceil(Double(windowCount) / Double(thumbnailColumns)))
         let width = CGFloat(columns) * thumbnailSize.width + CGFloat(max(0, columns - 1)) * thumbnailSpacing + 20
-        let height = CGFloat(rows) * thumbnailSize.height + CGFloat(max(0, rows - 1)) * thumbnailSpacing + 20
+        let gridHeight = CGFloat(rows) * thumbnailSize.height + CGFloat(max(0, rows - 1)) * thumbnailSpacing
+        let height = gridHeight + thumbnailFooterSpacing + thumbnailFooterHeight + 20
         return CGSize(width: width, height: height)
     }
 
@@ -438,7 +447,31 @@ final class SwitcherPanelController {
         gridView.rowSpacing = thumbnailSpacing
         gridView.xPlacement = .fill
         gridView.yPlacement = .fill
-        return gridView
+
+        selectedTitleField.alignment = .center
+        selectedTitleField.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        selectedTitleField.lineBreakMode = .byWordWrapping
+        selectedTitleField.maximumNumberOfLines = 2
+        updateSelectedTitle()
+
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.alignment = .centerX
+        container.distribution = .fill
+        container.spacing = thumbnailFooterSpacing
+        container.addArrangedSubview(gridView)
+        container.addArrangedSubview(selectedTitleField)
+        selectedTitleField.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+        selectedTitleField.heightAnchor.constraint(equalToConstant: thumbnailFooterHeight).isActive = true
+        return container
+    }
+
+    private func updateSelectedTitle() {
+        guard windows.indices.contains(selectedIndex) else {
+            selectedTitleField.stringValue = ""
+            return
+        }
+        selectedTitleField.stringValue = windows[selectedIndex].displayTitle
     }
 
     private func loadThumbnails() {
