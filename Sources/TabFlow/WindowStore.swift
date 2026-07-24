@@ -9,7 +9,7 @@ private func accessibilityObserverCallback(
 ) {
     guard let refcon else { return }
     let store = Unmanaged<WindowStore>.fromOpaque(refcon).takeUnretainedValue()
-    store.accessibilityStateDidChange()
+    store.accessibilityStateDidChange(element: element, notification: notification)
 }
 
 final class WindowStore {
@@ -17,8 +17,15 @@ final class WindowStore {
     private var observers: [pid_t: AXObserver] = [:]
     private var workspaceTokens: [NSObjectProtocol] = []
     private var refreshWorkItem: DispatchWorkItem?
+    private struct PendingFocus {
+        let pid: pid_t
+        let element: AXUIElement
+        let rank: Int64
+    }
+
     private var recency: [WindowKey: Int64] = [:]
     private var recencyClock: Int64 = 0
+    private var pendingFocuses: [PendingFocus] = []
     private var activeWindowKey: WindowKey?
     private(set) var activeDisplayID: CGDirectDisplayID?
 
@@ -33,7 +40,11 @@ final class WindowStore {
     }
 
     func candidates(scope: ScreenScope) -> [SwitchableWindow] {
-        windows
+        if !synchronizeFrontmostWindow() {
+            refreshNow()
+        }
+
+        return windows
             .filter { scope == .all || $0.displayID == activeDisplayID }
             .sorted { left, right in
                 let leftRank = recency[left.key] ?? 0
@@ -70,7 +81,19 @@ final class WindowStore {
         activeDisplayID = window.displayID
     }
 
-    func accessibilityStateDidChange() {
+    func accessibilityStateDidChange(element: AXUIElement, notification: CFString) {
+        if notification == (kAXFocusedWindowChangedNotification as CFString) {
+            var pid: pid_t = 0
+            if AXUIElementGetPid(element, &pid) == .success {
+                recordFocusedWindow(for: pid)
+            }
+        } else if notification == (kAXUIElementDestroyedNotification as CFString),
+                  let destroyedWindow = windows.first(where: { CFEqual($0.element, element) }) {
+            recency.removeValue(forKey: destroyedWindow.key)
+            if activeWindowKey == destroyedWindow.key {
+                activeWindowKey = nil
+            }
+        }
         scheduleRefresh()
     }
 
@@ -90,8 +113,16 @@ final class WindowStore {
         ]
 
         workspaceTokens = names.map { name in
-            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.scheduleRefresh()
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                guard let self else { return }
+                if let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                    if name == NSWorkspace.didTerminateApplicationNotification {
+                        self.removeRecency(for: application.processIdentifier)
+                    } else if name == NSWorkspace.didActivateApplicationNotification {
+                        self.recordFocusedWindow(for: application.processIdentifier)
+                    }
+                }
+                self.scheduleRefresh()
             }
         }
     }
@@ -162,36 +193,97 @@ final class WindowStore {
             }
         }
 
+        migrateRecency(from: windows, to: refreshed)
         windows = refreshed
+        applyPendingFocuses()
         let validKeys = Set(refreshed.map(\.key))
-        recency = recency.filter { validKeys.contains($0.key) }
         if recency.isEmpty {
             seedRecency(from: onscreenWindows, validKeys: validKeys)
         }
-        updateActiveWindow()
+        synchronizeFrontmostWindow()
     }
 
-    private func updateActiveWindow() {
-        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return }
-        let appElement = AXUIElementCreateApplication(frontmost.processIdentifier)
-        guard let focused: AXUIElement = attribute(appElement, kAXFocusedWindowAttribute as CFString),
-              let focusedWindow = windows.first(where: {
-                  $0.application.processIdentifier == frontmost.processIdentifier && CFEqual($0.element, focused)
-              }) else {
-            return
-        }
-        let key = focusedWindow.key
+    @discardableResult
+    private func synchronizeFrontmostWindow() -> Bool {
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
+        return recordFocusedWindow(for: frontmost.processIdentifier)
+    }
 
+    @discardableResult
+    private func recordFocusedWindow(for pid: pid_t) -> Bool {
+        let appElement = AXUIElementCreateApplication(pid)
+        guard let focused: AXUIElement = attribute(appElement, kAXFocusedWindowAttribute as CFString) else {
+            return false
+        }
+
+        guard let focusedWindow = windows.first(where: {
+            $0.application.processIdentifier == pid && CFEqual($0.element, focused)
+        }) else {
+            if pendingFocuses.last.map({ $0.pid == pid && CFEqual($0.element, focused) }) != true {
+                recencyClock += 1
+                pendingFocuses.append(PendingFocus(pid: pid, element: focused, rank: recencyClock))
+            }
+            activeWindowKey = nil
+            return false
+        }
+
+        let key = focusedWindow.key
         if activeWindowKey != key {
             promote(key)
             activeWindowKey = key
         }
-        activeDisplayID = windows.first(where: { $0.key == key })?.displayID ?? activeDisplayID
+        activeDisplayID = focusedWindow.displayID
+        return true
+    }
+
+    private func applyPendingFocuses() {
+        for pending in pendingFocuses {
+            guard let window = windows.first(where: {
+                $0.application.processIdentifier == pending.pid && CFEqual($0.element, pending.element)
+            }) else {
+                continue
+            }
+            recency[window.key] = max(recency[window.key] ?? 0, pending.rank)
+        }
+        pendingFocuses.removeAll()
     }
 
     private func promote(_ key: WindowKey) {
         recencyClock += 1
         recency[key] = recencyClock
+    }
+
+    private func removeRecency(for pid: pid_t) {
+        recency = recency.filter { $0.key.pid != pid }
+        if activeWindowKey?.pid == pid {
+            activeWindowKey = nil
+        }
+    }
+
+    private func migrateRecency(from previous: [SwitchableWindow], to refreshed: [SwitchableWindow]) {
+        for window in refreshed {
+            guard let oldWindow = previous.first(where: { oldWindow in
+                guard oldWindow.application.processIdentifier == window.application.processIdentifier else {
+                    return false
+                }
+                if CFEqual(oldWindow.element, window.element) {
+                    return true
+                }
+                guard activeWindowKey == oldWindow.key else { return false }
+                return abs(oldWindow.frame.minX - window.frame.minX) < 3 &&
+                    abs(oldWindow.frame.minY - window.frame.minY) < 3 &&
+                    abs(oldWindow.frame.width - window.frame.width) < 3 &&
+                    abs(oldWindow.frame.height - window.frame.height) < 3
+            }), oldWindow.key != window.key else {
+                continue
+            }
+            if let oldRank = recency.removeValue(forKey: oldWindow.key) {
+                recency[window.key] = max(recency[window.key] ?? 0, oldRank)
+            }
+            if activeWindowKey == oldWindow.key {
+                activeWindowKey = window.key
+            }
+        }
     }
 
     private func seedRecency(from descriptions: [WindowDescription], validKeys: Set<WindowKey>) {
@@ -303,13 +395,16 @@ final class WindowStore {
         frame: CGRect,
         descriptions: [WindowDescription]
     ) -> WindowDescription? {
-        descriptions.first { description in
-            guard description.pid == pid else { return false }
-            let sameFrame = abs(description.bounds.minX - frame.minX) < 3 &&
+        let applicationDescriptions = descriptions.filter { $0.pid == pid }
+        if !title.isEmpty,
+           let titleMatch = applicationDescriptions.first(where: { $0.title == title }) {
+            return titleMatch
+        }
+        return applicationDescriptions.first { description in
+            abs(description.bounds.minX - frame.minX) < 3 &&
                 abs(description.bounds.minY - frame.minY) < 3 &&
                 abs(description.bounds.width - frame.width) < 3 &&
                 abs(description.bounds.height - frame.height) < 3
-            return sameFrame || (!title.isEmpty && description.title == title)
         }
     }
 }
